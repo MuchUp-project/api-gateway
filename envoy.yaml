@@ -1,0 +1,96 @@
+static_resources:
+  listeners:
+    - name: main
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8080
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_http
+                codec_type: AUTO
+                upgrade_configs:
+                  - upgrade_type: websocket
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: all
+                      domains: ["*"]
+                      routes:
+                        # WebSocket for chat
+                        - match:
+                            prefix: "/ws"
+                          route:
+                            cluster: backend_service
+                            upgrade_configs:
+                              - upgrade_type: websocket
+                        # Normal HTTP
+                        - match:
+                            prefix: "/api"
+                          route:
+                            cluster: backend_service
+                        - match:
+                            prefix: "/ai"
+                          route:
+                            cluster: ai_service
+                http_filters:
+                  # 1. 認可（session token 検証）
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      http_service:
+                        server_uri:
+                          uri: http://backend-service.default.svc.cluster.local:8000
+                          cluster: backend_service
+                          timeout: 0.5s
+                        authorization_request:
+                          allowed_headers:
+                            patterns:
+                              - exact: authorization
+                      failure_mode_allow: false
+
+                  # 2. レート制限（ローカル）
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: ratelimit
+                      token_bucket:
+                        max_tokens: 50
+                        tokens_per_fill: 50
+                        fill_interval: 60s
+
+                  # 3. Router
+                  - name: envoy.filters.http.router
+
+  clusters:
+    - name: backend_service
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: backend_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: backend-service.default.svc.cluster.local
+                      port_value: 8000
+
+    - name: ai_service
+      connect_timeout: 1s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: ai_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: ai-service.default.svc.cluster.local
+                      port_value: 7000
